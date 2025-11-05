@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"fmt"
-	"io"
 	"net/http"
 
 	"www.github.com/isaac-albert/Distributed-KV-Store/internal/parser"
@@ -27,18 +26,12 @@ func PostHandler(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "empty body \n")
 		return
 	}
-
-	data, err := io.ReadAll(r.Body)
+	err := parser.Parse(r.Body)
 	if err != nil {
-		fmt.Fprintf(w, "error parsing body: %v", err)
+		http.Error(w, "error parsing the body", http.StatusBadRequest)
 		return
 	}
-	err = parser.Parse(data)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	fmt.Fprintf(w, "successfull key value post")
+	fmt.Fprintf(w, "successfull key value post\n")
 }
 
 func GetHandler(w http.ResponseWriter, r *http.Request) {
