@@ -4,9 +4,7 @@ Copyright © 2025 NAME HERE <EMAIL ADDRESS>
 package main
 
 import (
-	"fmt"
-
-	"www.github.com/isaac-albert/Distributed-KV-Store/cmd"
+	"www.github.com/isaac-albert/Distributed-KV-Store/cmd/flag"
 )
 
 func main() {
@@ -80,7 +78,8 @@ func main() {
 		step - 3: bootstrap of a single node at the start and then call AddVoter() later
 	*/
 
-	fmt.Println("build executing perfectly")
-	cmd.Parse()
-	cmd.PrintFlags()
+	//fmt.Println("build executing perfectly")
+	//fmt.Println("...")
+	flag.StartFlags()
+	flag.GetCommand()
 }
