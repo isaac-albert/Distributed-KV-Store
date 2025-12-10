@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log"
 
 	"www.github.com/isaac-albert/Distributed-KV-Store/cmd/shutdown"
 	"www.github.com/isaac-albert/Distributed-KV-Store/internal/raft"
@@ -30,9 +31,9 @@ var (
 )
 
 var (
-	_nodeNum              = 0
-	_defaultListenAddress = "localhost:3000"
-	_defaultRaftAddress   = "localhost:4000"
+	_NodeNum = 0
+	_defaultListenAddress = "127.0.0.1:3000"
+	_defaultRaftAddress   = "127.0.0.1:4000"
 )
 
 var (
@@ -40,7 +41,8 @@ var (
 )
 
 func init() {
-	flag.StringVar(&nodeId, "id", fmt.Sprintf("node%d", _nodeNum), "sets the node id")
+	log.Println("node id verification", "nodeid")
+	flag.StringVar(&nodeId, "id", fmt.Sprintf("node%d", _NodeNum), "sets the node id")
 	flag.StringVar(&listenAddr, "laddr", _defaultListenAddress, "node listens on this port")
 	flag.StringVar(&raftAddr, "raddr", _defaultRaftAddress, "intra cluster node port")
 }
@@ -49,28 +51,21 @@ func GetArg() string {
 	return flag.Args()[0]
 }
 
-func printFlags() {
-	fmt.Println("node id is: ", nodeId)
-	fmt.Println("listenAddr is: ", listenAddr)
-	fmt.Println("raftAddr is: ", raftAddr)
-}
 
 func StartFlags() {
 	flag.Parse()
+	log.Println("Parsed flags - nodeId:", nodeId, "listenAddr:", listenAddr, "raftAddr:", raftAddr)
 	//printFlags()
 	//fmt.Println("the main command is:", GetArg())
 }
 
-func GetCommand() error {
+func StartProgramOnCommand() error {
 	switch GetArg() {
 	case "node":
 		err := raft.StartNode(nodeId, listenAddr, raftAddr)
 		if err != nil {
-			return fmt.Errorf("flag: %w", err)
+			return fmt.Errorf("error starting node: %w", err)
 		}
-		return nil
-	case "http":
-		//StartHTTP()
 		return nil
 	case "shutdown":
 		err := shutdown.ShutDown()

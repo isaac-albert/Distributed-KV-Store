@@ -2,9 +2,7 @@ package raft
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/hashicorp/go-hclog"
@@ -12,6 +10,7 @@ import (
 )
 
 const (
+	BOOTSTRAP_NODE = "node0"
 	SnapsRetainCount    = 5
 	ProcessRPCTimeout   = 100 * time.Millisecond
 	AddVoterTimeout     = 200 * time.Millisecond
@@ -24,82 +23,22 @@ const (
 type Node struct {
 	*raft.Raft
 
-	raddr    raft.ServerAddress
-	serverId raft.ServerID
-	laddr    string
-	Path     NodePath
+	FSM       *RaftFSM
+	Raddr     raft.ServerAddress
+	ServerId  raft.ServerID
+	Logger    hclog.Logger
+	Laddr     string
+	Stores    NodeStore
+	Transport raft.Transport
 }
 
-type ClusterSeeds struct {
-	Nodes []*Node
-}
-
-var ClusterNodes = NewClusterSeeds()
-
-func NewClusterSeeds() *ClusterSeeds {
-	return &ClusterSeeds{
-		Nodes: make([]*Node, 0),
-	}
-}
-
-func (c *ClusterSeeds) AddNode(node *Node) {
-	c.Nodes = append(c.Nodes, node)
-}
-
-func (c *ClusterSeeds) GetNode() *Node {
-	return c.Nodes[0]
-}
-
-func (c *ClusterSeeds) GetLeaderFromAddress(addr raft.ServerAddress, id raft.ServerID) *Node {
-	for _, n := range c.Nodes {
-		if n.raddr == addr && n.serverId == id {
-			return n
-		}
-		continue
-	}
-
-	return nil
-}
-
-func (c *ClusterSeeds) GetLeader(ctx context.Context) (*Node, error) {
-
-	var (
-		leaderAddr raft.ServerAddress
-		leaderID   raft.ServerID
-	)
-
-	ticker := time.Tick(GetLeaderTicker)
-
-outer:
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, errors.New("leader not found")
-		case <-ticker:
-			n := c.GetNode()
-			if n == nil {
-				continue
-			}
-			leaderAddr = n.raddr
-			leaderID = n.serverId
-			break outer
-		}
-	}
-
-	node := c.GetLeaderFromAddress(leaderAddr, leaderID)
-	if node == nil {
-		return nil, errors.New("error findiing leader node from the address")
-	}
-
-	return node, nil
-}
-
-func NewRaftNode(laddr string, raddr raft.ServerAddress, id raft.ServerID) *Node {
+func NewRaftNode(laddr string, Raddr raft.ServerAddress, id raft.ServerID, logger hclog.Logger) *Node {
 
 	return &Node{
-		laddr:    laddr,
-		raddr:    raddr,
-		serverId: id,
+		Laddr:    laddr,
+		Raddr:    Raddr,
+		ServerId: id,
+		Logger:   logger,
 	}
 }
 
@@ -114,44 +53,59 @@ func StartNode(id, laddr, raddr string) error {
 
 	logger := hclog.New(&logConfig)
 
-	var newNode = NewRaftNode(laddr, raft.ServerAddress(raddr), raft.ServerID(id))
+	var newNode = NewRaftNode(laddr, raft.ServerAddress(raddr), raft.ServerID(id), logger)
 
-	sstore, err := newNode.Path.CreateStableStore(id, logger)
+	sstore, err := newNode.Stores.CreateStableStore(id, logger)
 	if err != nil {
+		logger.Error("error getting stable store", "store", sstore)
 		return fmt.Errorf("start node: %w", err)
 	}
-	lstore, err := newNode.Path.CreateLogStore(id, logger)
+	lstore, err := newNode.Stores.CreateLogStore(id, logger)
 	if err != nil {
+		logger.Error("error getting log store", "store", lstore)
 		return fmt.Errorf("start node: %w", err)
 	}
 
-	snapstore, err := newNode.Path.CreateSnapStore(id, logger)
+	snapstore, err := newNode.Stores.CreateSnapStore(id, logger)
 	if err != nil {
+		logger.Error("error getting snap store", "store", snapstore)
 		return fmt.Errorf("start node: %w", err)
 	}
 
 	var config = raft.DefaultConfig()
 	config.LocalID = raft.ServerID(id)
 
-	transport, err := NewRaftTCPTransport(raddr, logger)
-	if err != nil {
-		return fmt.Errorf("start node: %w", err)
-	}
+	logger.Info("configuration of the new node", "config", config)
 
-	fsm := NewRaftFSM(id)
+	//used Raddr for the same net.Addr, in production use laddr
+	transport, err := NewRaftTCPTransport(raddr, raddr, logger)
+	if err != nil {
+		logger.Error("error getting valid transport", "transport", transport)
+		return fmt.Errorf("start node transport: %w", err)
+	}
+	newNode.Transport = transport
+
+	fsm, err := NewRaftFSM(id)
+	if err != nil {
+		logger.Error("error creating new fsm for the node", "fsm", fsm)
+		return fmt.Errorf("error creating new fsm: %w", err)
+	}
+	newNode.FSM = fsm
 
 	node, err := raft.NewRaft(config, fsm, lstore, sstore, snapstore, transport)
 	if err != nil {
+		logger.Error("error creating new Raft node with arguments",
+			"config", config)
 		return fmt.Errorf("start node: %w", err)
 	}
 
 	newNode.Raft = node
 
-	if newNode.serverId == "node0" {
+	if newNode.ServerId == BOOTSTRAP_NODE {
 
 		isExist, err := raft.HasExistingState(lstore, sstore, snapstore)
 		if err != nil {
-			logger.Error("has existing state error", "error", err)
+			logger.Error("error getting the state of the server", "error", err)
 			return err
 		}
 
@@ -159,8 +113,8 @@ func StartNode(id, laddr, raddr string) error {
 			future := newNode.BootstrapCluster(raft.Configuration{
 				Servers: []raft.Server{
 					{
-						ID:      newNode.serverId,
-						Address: newNode.raddr,
+						ID:      newNode.ServerId,
+						Address: newNode.Raddr,
 					},
 				},
 			})
@@ -170,26 +124,35 @@ func StartNode(id, laddr, raddr string) error {
 				return fmt.Errorf("start node: %w", err)
 			}
 
-			log.Println(newNode.String(), "created")
+			logger.Info("created new server", "server", newNode.String())
 
-			ClusterNodes.AddNode(newNode)
+			server := NewServer(laddr)
+			go server.StartTCPServer(logger)
+			go server.startHTTPServer(logger)
+
+			BootStrapConfig(newNode.Laddr, string(newNode.Raddr), string(id), logger)
+
+			//ClusterNodes.AddNode(newNode)
 		} else {
-			logger.Error("state already exists node is trying to get in existing configuration")
+			logger.Error("state already exists, use [ nodeN ] N > 0 for new nodes",
+				"Log_Store", newNode.Stores.LogStorePath,
+				"Stable_Store", newNode.Stores.StableStorePath,
+				"Snap_Store", newNode.Stores.StableStorePath)
 			return fmt.Errorf("state already exists for node0")
 		}
 
 	} else {
-		ctx, cancel := context.WithTimeout(context.Background(), GetLeaderTimeout)
+		_, cancel := context.WithTimeout(context.Background(), GetLeaderTimeout)
 		defer cancel()
 
-		leaderNode, err := ClusterNodes.GetLeader(ctx)
-		if err != nil {
+		//leaderNode, err := ClusterNodes.GetLeader(ctx)
+		if err == nil {
 			return fmt.Errorf("start node: %w", err)
 		}
 
-		index := leaderNode.LastIndex()
-		leaderNode.AddVoter(newNode.serverId, newNode.raddr, index, AddVoterTimeout)
-		ClusterNodes.AddNode(newNode)
+		// index := leaderNode.LastIndex()
+		// leaderNode.AddVoter(newNode.ServerId, newNode.Raddr, index, AddVoterTimeout)
+		// ClusterNodes.AddNode(newNode)
 	}
 
 	return nil
