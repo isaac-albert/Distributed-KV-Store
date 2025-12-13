@@ -1,7 +1,7 @@
 package raft
 
 import (
-	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -10,149 +10,120 @@ import (
 )
 
 const (
-	BOOTSTRAP_NODE = "node0"
-	SnapsRetainCount    = 5
-	ProcessRPCTimeout   = 100 * time.Millisecond
-	AddVoterTimeout     = 200 * time.Millisecond
-	GetLeaderTimeout    = 500 * time.Millisecond
-	GetValidNodeTimeout = 200 * time.Millisecond
-	GetNodeTicker       = 50 * time.Millisecond
-	GetLeaderTicker     = 50 * time.Millisecond
+	BOOTSTRAP_NODE              = "node0"
+	SnapsRetainCount            = 5
+	ProcessRPCTimeout           = 100 * time.Millisecond
+	AddVoterTimeout             = 200 * time.Millisecond
+	GetLeaderTimeout            = 500 * time.Millisecond
+	GetValidNodeTimeout         = 200 * time.Millisecond
+	GetNodeTicker               = 50 * time.Millisecond
+	GetLeaderTicker             = 50 * time.Millisecond
+	StagingVoterDurationTimeout = 100 * time.Millisecond
 )
 
 type Node struct {
 	*raft.Raft
 
-	FSM       *RaftFSM
-	Raddr     raft.ServerAddress
-	ServerId  raft.ServerID
-	Logger    hclog.Logger
-	Laddr     string
-	Stores    NodeStore
-	Transport raft.Transport
+	FSM      *RaftFSM
+	ServerId raft.ServerID
+	RaftAddr raft.ServerAddress
+	HTTPAddr string
+	Logger   hclog.Logger
 }
 
-func NewRaftNode(laddr string, Raddr raft.ServerAddress, id raft.ServerID, logger hclog.Logger) *Node {
+func NewRaftNode(nodeId, httpAddr, raftAddr string, logger hclog.Logger) (*Node, error) {
 
-	return &Node{
-		Laddr:    laddr,
-		Raddr:    Raddr,
-		ServerId: id,
+	node := &Node{
+		ServerId: raft.ServerID(nodeId),
+		RaftAddr: raft.ServerAddress(raftAddr),
+		HTTPAddr: httpAddr,
 		Logger:   logger,
 	}
+
+	err := node.StartNode()
+	if err != nil {
+		return nil, err
+	}
+
+
+	return node, nil
 }
 
-func StartNode(id, laddr, raddr string) error {
+func (n *Node) StartNode() error {
 
-	logConfig := hclog.LoggerOptions{
-		Name:            id,
-		Level:           hclog.Debug,
-		IncludeLocation: true,
-		DisableTime:     true,
+	sstore, err := CreateStableStore(string(n.ServerId), n.Logger)
+	if err != nil {
+		n.Logger.Error("error getting stable store", "error", err)
+		return err
+	}
+	lstore, err := CreateLogStore(string(n.ServerId), n.Logger)
+	if err != nil {
+		n.Logger.Error("error getting log store", "error", err)
+		return err
 	}
 
-	logger := hclog.New(&logConfig)
-
-	var newNode = NewRaftNode(laddr, raft.ServerAddress(raddr), raft.ServerID(id), logger)
-
-	sstore, err := newNode.Stores.CreateStableStore(id, logger)
+	snapstore, err := CreateSnapStore(string(n.ServerId), n.Logger)
 	if err != nil {
-		logger.Error("error getting stable store", "store", sstore)
-		return fmt.Errorf("start node: %w", err)
-	}
-	lstore, err := newNode.Stores.CreateLogStore(id, logger)
-	if err != nil {
-		logger.Error("error getting log store", "store", lstore)
-		return fmt.Errorf("start node: %w", err)
-	}
-
-	snapstore, err := newNode.Stores.CreateSnapStore(id, logger)
-	if err != nil {
-		logger.Error("error getting snap store", "store", snapstore)
-		return fmt.Errorf("start node: %w", err)
+		n.Logger.Error("error getting snap store", "error", err)
+		return err
 	}
 
 	var config = raft.DefaultConfig()
-	config.LocalID = raft.ServerID(id)
+	config.LocalID = raft.ServerID(n.ServerId)
 
-	logger.Info("configuration of the new node", "config", config)
+	n.Logger.Info("Config of the new node", "config", config)
 
-	//used Raddr for the same net.Addr, in production use laddr
-	transport, err := NewRaftTCPTransport(raddr, raddr, logger)
+	//used Raddr for the same net.Addr, in production use HTTPAddr
+	transport, err := NewRaftTCPTransport(string(n.RaftAddr), n.Logger)
 	if err != nil {
-		logger.Error("error getting valid transport", "transport", transport)
-		return fmt.Errorf("start node transport: %w", err)
-	}
-	newNode.Transport = transport
-
-	fsm, err := NewRaftFSM(id)
-	if err != nil {
-		logger.Error("error creating new fsm for the node", "fsm", fsm)
-		return fmt.Errorf("error creating new fsm: %w", err)
-	}
-	newNode.FSM = fsm
-
-	node, err := raft.NewRaft(config, fsm, lstore, sstore, snapstore, transport)
-	if err != nil {
-		logger.Error("error creating new Raft node with arguments",
-			"config", config)
-		return fmt.Errorf("start node: %w", err)
+		n.Logger.Error("error getting valid transport", "error", err)
+		return err
 	}
 
-	newNode.Raft = node
+	fsm, err := NewRaftFSM(string(n.ServerId))
+	if err != nil {
+		n.Logger.Error("error creating new fsm for the node", "error", err)
+		return err
+	}
 
-	if newNode.ServerId == BOOTSTRAP_NODE {
+	n.FSM = fsm
 
-		isExist, err := raft.HasExistingState(lstore, sstore, snapstore)
-		if err != nil {
-			logger.Error("error getting the state of the server", "error", err)
-			return err
-		}
+	ok, err := raft.HasExistingState(lstore, sstore, snapstore)
+	if err != nil {
+		n.Logger.Error("error getting the state of the node", "error", err)
+		return err
+	}
 
-		if !isExist {
-			future := newNode.BootstrapCluster(raft.Configuration{
-				Servers: []raft.Server{
-					{
-						ID:      newNode.ServerId,
-						Address: newNode.Raddr,
-					},
+	if ok {
+		n.Logger.Warn("node of server id has an existing state", "serverID", n.ServerId)
+		return errors.New("error: node already exists")
+	}
+
+	ne, err := raft.NewRaft(config, fsm, lstore, sstore, snapstore, transport)
+	if err != nil {
+		n.Logger.Error("error creating new Raft node with argument", "error", err)
+		return err 
+	}
+
+	n.Raft = ne
+	return nil
+}
+
+func (n *Node) BootStrap() error {
+	future := n.BootstrapCluster(
+		raft.Configuration{
+			Servers: []raft.Server{
+				{
+					ID:      n.ServerId,
+					Address: n.RaftAddr,
 				},
-			})
+			},
+		},
+	)
 
-			err = future.Error()
-			if err != nil {
-				return fmt.Errorf("start node: %w", err)
-			}
-
-			logger.Info("created new server", "server", newNode.String())
-
-			server := NewServer(laddr)
-			go server.StartTCPServer(logger)
-			go server.startHTTPServer(logger)
-
-			BootStrapConfig(newNode.Laddr, string(newNode.Raddr), string(id), logger)
-
-			//ClusterNodes.AddNode(newNode)
-		} else {
-			logger.Error("state already exists, use [ nodeN ] N > 0 for new nodes",
-				"Log_Store", newNode.Stores.LogStorePath,
-				"Stable_Store", newNode.Stores.StableStorePath,
-				"Snap_Store", newNode.Stores.StableStorePath)
-			return fmt.Errorf("state already exists for node0")
-		}
-
-	} else {
-		_, cancel := context.WithTimeout(context.Background(), GetLeaderTimeout)
-		defer cancel()
-
-		//leaderNode, err := ClusterNodes.GetLeader(ctx)
-		if err == nil {
-			return fmt.Errorf("start node: %w", err)
-		}
-
-		// index := leaderNode.LastIndex()
-		// leaderNode.AddVoter(newNode.ServerId, newNode.Raddr, index, AddVoterTimeout)
-		// ClusterNodes.AddNode(newNode)
+	err := future.Error()
+	if err != nil {
+		return fmt.Errorf("bootstrap node: %w", err)
 	}
 
 	return nil

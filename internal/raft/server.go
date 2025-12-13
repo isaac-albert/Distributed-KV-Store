@@ -1,297 +1,199 @@
 package raft
 
 import (
-	"encoding/binary"
+	"bytes"
+	"context"
 	"encoding/json"
-	"errors"
+	"fmt"
 	"io"
-	"log"
-	"net"
 	"net/http"
-	"net/url"
-	"strconv"
-	"strings"
-	"time"
+	"os"
 
 	"github.com/hashicorp/go-hclog"
+	"github.com/hashicorp/raft"
 )
 
 const (
-	ResponseTimeout = 500 * time.Millisecond
-	MaxBufferSize   = 1024 * 4
+	StartNode = "node0"
 )
 
 type Server struct {
-	Mux         *http.ServeMux
-	TCPListener net.Listener
-	Node        *Node
-	TCPAddr     string
+	HttpServer *http.Server
+	Node       *Node
+	Logger     hclog.Logger
 }
 
-type KV struct {
-	Key   []byte `json:"key"`
-	Value []byte `json:"value"`
+type JoinRequest struct {
+	Id      raft.ServerID      `json:"id"`
+	Address raft.ServerAddress `json:"address"`
 }
 
-func NewServer(addr string) *Server {
-	tcpAddr, err := GetTCPAddress(addr)
-	if err != nil {
-		log.Panic(err)
+type NodeResp struct {
+	Error string `json:"error"`
+}
+
+func NewServer(nodeId, httpAddr, raftAddr string) (*Server, error) {
+
+	logConfig := hclog.LoggerOptions{
+		Name:            nodeId,
+		Level:           hclog.Debug,
+		IncludeLocation: true,
+		DisableTime:     true,
 	}
 
-	listener, err := net.Listen("tcp", tcpAddr)
-	if err != nil {
-		log.Panic(err)
-	}
+	logger := hclog.New(&logConfig)
 
 	server := &Server{
-		TCPAddr:     tcpAddr,
-		Mux:         http.NewServeMux(),
-		TCPListener: listener,
+		Logger: logger,
 	}
 
-	server.Handlers()
-	return server
-}
-
-func GetTCPAddress(addr string) (string, error) {
-	hp := strings.Split(addr, ":")
-	host := hp[0]
-	port := hp[1]
-
-	log.Println("the host, port is", "host", host, "port", port)
-
-	portN, err := strconv.Atoi(port)
+	err := server.getRaftNode(nodeId, httpAddr, raftAddr)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	tcpPort := portN + 12
-	hp[1] = strconv.Itoa(tcpPort)
+	server.getHttpServer(httpAddr)
 
-	log.Println("new tcp port", "port", port)
-
-	addr = strings.Join(hp, ":")
-
-	return addr, nil
+	return server, nil
 }
 
-// func SetServers() ([]*Server, error) {
+func (s *Server) getRaftNode(nodeID, httpAddr, raftAddr string) error {
 
-// 	var servers []*Server
+	node, err := NewRaftNode(nodeID, httpAddr, raftAddr, s.Logger)
+	if err != nil {
+		return err
+	}
 
-// 	for _, node := range rt.ClusterNodes.Nodes {
-// 		if node != nil {
-// 			s := NewServer(node.Laddr)
-// 			s.Node = node
-// 			servers = append(servers, s)
-// 		} else {
-// 			//log.Fatal("node is bootstraped but is nil", "node", node)
-// 			return nil, errors.New("node is bootstraped but is nil")
-// 		}
-// 	}
-
-// 	return servers, nil
-// }
-
-// func StartServers() error {
-// 	servers, err := SetServers()
-// 	if err != nil {
-// 		return fmt.Errorf("error getting servers: %w", err)
-// 	}
-
-// 	for _, server := range servers {
-// 		go server.startServer(server.Node.Logger)
-// 	}
-
-// 	return nil
-// }
-
-func (s *Server) StartTCPCLient(addr string) {
-
+	s.Node = node
+	return nil
 }
 
-func (s *Server) StartTCPServer(logger hclog.Logger) {
-	for {
-		conn, err := s.TCPListener.Accept()
+func (s *Server) getHttpServer(httpAddr string) error {
+
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/get", s.GetKV)
+	mux.HandleFunc("/set", s.SetKV)
+	mux.HandleFunc("/delete", s.DeleteKV)
+	mux.HandleFunc("/join", s.JoinCluster)
+	mux.HandleFunc("/leave", s.LeaveCluster)
+
+	srv := &http.Server{
+		Addr:    httpAddr,
+		Handler: mux,
+	}
+
+	s.HttpServer = srv
+	return nil
+}
+
+func (s *Server) StartHTTPServer() error {
+	if err := s.HttpServer.ListenAndServe(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Server) ShutdownHTTP(ctx context.Context) error {
+
+	err := s.HttpServer.Shutdown(ctx)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (s *Server) ShutdownRaft() error {
+
+	future := s.Node.Shutdown()
+	if err := future.Error(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (s *Server) ShutdownStores() error {
+
+	err := os.RemoveAll("assets/")
+	if err != nil {
+		return fmt.Errorf("error removing assets: %w", err)
+	}
+
+	return nil
+}
+
+func (s *Server) AddNodeToNetwork(joinAddr string) error {
+	if s.Node.ServerId == StartNode {
+		err := s.Node.BootStrap()
 		if err != nil {
-			if errors.Is(err, net.ErrClosed) {
-				break
-			}
-			logger.Error("error acceptign tcp connections", "error", err, "addr", s.TCPAddr)
-			continue
+			return err
 		}
-
-		go s.HandleTCPConn(conn)
+		s.Logger.Info("bootstrapped first node successfully")
+	} else {
+		err := s.sendJoinReqToNetwork(joinAddr)
+		if err != nil {
+			s.Logger.Error("error joining to network", "error", err)
+			return err
+		}
 	}
 
-	logger.Info("shutting down tcp server at addr", "addr", s.TCPAddr)
+	return nil
 }
 
-func (s *Server) PushToTCPConn(data []byte, addr string) {
-	//start tcp connection to address
-	raddr, err := net.ResolveTCPAddr("tcp", addr)
-	if err != nil {
-		s.Node.Logger.Error("error resolving tcp address", "addr", addr, "error", err)
-		return
+func (s *Server) sendJoinReqToNetwork(joinAddr string) error {
+
+	payload := &JoinRequest{
+		Id:      s.Node.ServerId,
+		Address: s.Node.RaftAddr,
 	}
 
-	conn, err := net.DialTCP("tcp", nil, raddr)
+	data, err := json.Marshal(payload)
 	if err != nil {
-		s.Node.Logger.Error("error dialing to tcp address", "addr", addr, "error", err)
-		return
-	}
-	defer conn.Close()
-
-	//send data length to the tcp connection first
-	dataLen := uint32(len(data))
-	if err := binary.Write(conn, binary.BigEndian, dataLen); err != nil {
-		s.Node.Logger.Error("error sending binary data length to tcp")
-		return
+		return err
 	}
 
-	_, err = conn.Write(data)
+	buf := bytes.NewBuffer(data)
+
+	URL_String := "http://" + joinAddr + "/join"
+
+	resp, err := http.Post(URL_String, "application/json", buf)
 	if err != nil {
-		s.Node.Logger.Error("error writing to tcp connection", "error", err, "addr", addr)
+		return fmt.Errorf("join request failed: %w", err)
 	}
+
+	if err := ParseNodeResponse(resp); err != nil {
+		return err
+	}
+	
+	return nil
 }
 
-func (s *Server) HandleTCPConn(c net.Conn) ([]byte, error) {
-	defer c.Close()
+func (s *Server) SetKV(w http.ResponseWriter, r *http.Request)        {}
+func (s *Server) GetKV(w http.ResponseWriter, r *http.Request)        {}
+func (s *Server) DeleteKV(w http.ResponseWriter, r *http.Request)     {}
+func (s *Server) JoinCluster(w http.ResponseWriter, r *http.Request)  {}
+func (s *Server) LeaveCluster(w http.ResponseWriter, r *http.Request) {}
 
-	var length uint32
-	if err := binary.Read(c, binary.BigEndian, length); err != nil {
-		s.Node.Logger.Error("error reading binary legnth from connection")
-		return nil, err
-	}
-
-	buf := make([]byte, int(length))
-
-	_, err := io.ReadFull(c, buf)
+func ParseNodeResponse(r *http.Response) error {
+	defer r.Body.Close()
+	
+	data, err := io.ReadAll(r.Body)
 	if err != nil {
-		s.Node.Logger.Error("error reading data from tcp connection", "Error", err)
-		return nil, err
+		return fmt.Errorf("error reading response: %w", err)
 	}
 
-	return buf, nil
-}
+	var nodeResp = &NodeResp{}
 
-func (s *Server) startHTTPServer(logger hclog.Logger) {
-	err := http.ListenAndServe(s.Node.Laddr, s.Mux)
+	err = json.Unmarshal(data, nodeResp)
 	if err != nil {
-		logger.Error("server failed", "error", err)
-	}
-}
-
-func (s *Server) Handlers() {
-	s.Mux.HandleFunc("/set", s.SetKV)
-	s.Mux.HandleFunc("/get", s.GetKV)
-}
-
-func (s *Server) SetKV(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "wrong method brotha, use 'POST'", http.StatusBadRequest)
-		return
-	}
-	/*
-		step -1: read the data from the body, if no body exists send an error.
-		step -2: if leader Apply() if not then forward
-		step - 3: apply to the leader
-		step - 4: wati for leader's confirmation that it has committed
-		step- 5: send message to the user
-	*/
-
-	leaderAddr, leaderId := s.Node.LeaderWithID()
-	if leaderAddr == "" && leaderId == "" {
-		http.Error(w, "error getting leader", http.StatusInternalServerError)
-		return
+		return fmt.Errorf("error unmarshalling data: %w", err)
 	}
 
-	// nodes := rt.ClusterNodes
-
-	// leaderNode := nodes.GetNodeWithID(leaderId)
-
-	// if leaderNode.Laddr != s.Node.Laddr && leaderNode.Raddr != s.Node.Raddr {
-	// 	//redirect
-	// 	return
-	// }
-
-	kv := &KV{}
-
-	err := json.NewDecoder(r.Body).Decode(kv)
-	if err != nil {
-		http.Error(w, "error decoding the body", http.StatusBadRequest)
-		return
+	if nodeResp.Error != "" {
+		return fmt.Errorf("join request denied by leader: %s", nodeResp.Error)
 	}
 
-	var kvLog = KVOp{}
-
-	kvLog.Op = "SET"
-	kvLog.Key = []byte(kv.Key)
-	kvLog.Value = []byte(kv.Value)
-
-	// data, err := json.Marshal(kvLog)
-	// if err != nil {
-	// 	http.Error(w, "error marshalling the body to kvlog", http.StatusInternalServerError)
-	// 	return
-	// }
-
-	// future := leaderNode.Apply(data, ResponseTimeout)
-	// err = future.Error()
-	// if err == raft.ErrAbortedByRestore {
-	// 	log.Println("snapshot restore, retrying...")
-	// 	time.Sleep(time.Millisecond * 100)
-	// 	future := leaderNode.Apply(data, ResponseTimeout)
-	// 	err = future.Error()
-	// 	if err != nil {
-	// 		http.Error(w, "error Applying after retry", http.StatusExpectationFailed)
-	// 		return
-	// 	}
-	// }
-	// if err == raft.ErrLeadershipLost {
-	// 	http.Error(w, "leadership lost, retry apply", http.StatusInternalServerError)
-	// 	return
-	// }
-	// if err != nil {
-	// 	http.Error(w, "raft internal error", http.StatusInternalServerError)
-	// 	return
-	// }
-
-	// result := future.Response()
-	// resp, ok := result.(rt.FSMResponse)
-	// if !ok {
-	// 	http.Error(w, "error parsing the response", http.StatusInternalServerError)
-	// 	return
-	// }
-
-	// if resp.Error != nil {
-	// 	http.Error(w, "error writing to FSM", http.StatusExpectationFailed)
-	// }
-
-	// res := []byte(fmt.Sprintf("[ %v : %v ]", resp.Kv.Key, resp.Kv.Value))
-	// w.WriteHeader(http.StatusOK)
-	// w.Write(res)
-}
-
-func (s *Server) GetKV(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "wrong method brotha, use 'GET'", http.StatusBadRequest)
-		return
-	}
-
-	//URL = "http://localhost:3000/get/?key=junkie"
-
-	_, err := url.Parse(r.URL.RawQuery)
-	if err != nil {
-		http.Error(w, "error reading key", http.StatusBadRequest)
-		return
-	}
-
-}
-
-func (s *Server) DeleteKV(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		http.Error(w, "wrong method brotha, use 'DELETE'", http.StatusBadRequest)
-		return
-	}
+	return nil
 }

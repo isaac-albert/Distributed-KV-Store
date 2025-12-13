@@ -6,13 +6,12 @@ package main
 import (
 	"log"
 
-	"www.github.com/isaac-albert/Distributed-KV-Store/cmd/flag"
+	"www.github.com/isaac-albert/Distributed-KV-Store/cmd"
 )
 
 func main() {
-	flag.StartFlags()
-	err := flag.StartProgramOnCommand()
+	err := cmd.StartProgram()
 	if err != nil {
-		log.Panic(err)
+		log.Fatal(err)
 	}
 }

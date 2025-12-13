@@ -4,15 +4,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log"
-
-	"www.github.com/isaac-albert/Distributed-KV-Store/cmd/shutdown"
-	"www.github.com/isaac-albert/Distributed-KV-Store/internal/raft"
+	"strings"
 )
 
 /*
 	model commands:
-		kvstore node -id node0 -laddr localhost:11000  -raddr localhost:12000
+		kvstore -id node0 -laddr localhost:11000  -raddr localhost:12000 node
 		// when this above command is executed, it creates a stablestore file path as well as a log store filepath
 		// if not already created and stores the files in ./internal/store/stablestore/nodeId
 		// if this is the first node to be created, it checks whether the directories ./internal/store/stablestore and ./internal/store/logstore are created
@@ -24,16 +21,26 @@ import (
 		// for that matter. so for this purpose we are required to start at least 1 node before we start the http server otherwise an error will be thrown out.
 */
 
+type FlagConfig struct {
+	Cmd string
+	NodeID   string
+	HttpAddr string
+	RaftAddr string
+	JoinAddr string
+}
+
 var (
 	nodeId     string
 	listenAddr string
 	raftAddr   string
+	joinAddr string
 )
 
 var (
-	_NodeNum = 0
-	_defaultListenAddress = "127.0.0.1:3000"
-	_defaultRaftAddress   = "127.0.0.1:4000"
+	_NodeNum                 = 0
+	_defaultFirstHTTPAddress = "127.0.0.1:3000"
+	_defaultFirstRaftAddress = "127.0.0.1:4000"
+	_defaultJoinAddress = _defaultFirstHTTPAddress
 )
 
 var (
@@ -41,39 +48,28 @@ var (
 )
 
 func init() {
-	log.Println("node id verification", "nodeid")
 	flag.StringVar(&nodeId, "id", fmt.Sprintf("node%d", _NodeNum), "sets the node id")
-	flag.StringVar(&listenAddr, "laddr", _defaultListenAddress, "node listens on this port")
-	flag.StringVar(&raftAddr, "raddr", _defaultRaftAddress, "intra cluster node port")
+	flag.StringVar(&listenAddr, "laddr", _defaultFirstHTTPAddress, "node listens on this port")
+	flag.StringVar(&raftAddr, "raddr", _defaultFirstRaftAddress, "intra cluster node port")
+	flag.StringVar(&joinAddr, "join", _defaultJoinAddress, "to join to the first node in the cluster")
 }
 
 func GetArg() string {
 	return flag.Args()[0]
 }
 
-
-func StartFlags() {
+func StartFlags() (*FlagConfig, error) {
 	flag.Parse()
-	log.Println("Parsed flags - nodeId:", nodeId, "listenAddr:", listenAddr, "raftAddr:", raftAddr)
-	//printFlags()
-	//fmt.Println("the main command is:", GetArg())
-}
-
-func StartProgramOnCommand() error {
-	switch GetArg() {
-	case "node":
-		err := raft.StartNode(nodeId, listenAddr, raftAddr)
-		if err != nil {
-			return fmt.Errorf("error starting node: %w", err)
-		}
-		return nil
-	case "shutdown":
-		err := shutdown.ShutDown()
-		if err != nil {
-			return fmt.Errorf("error shutting down: %w", err)
-		}
-		return nil
-	default:
-		return ErrInvalidCommand
+	cmd := GetArg()
+	cmdL := strings.ToLower(cmd)
+	if cmdL != "node" && cmdL != "shutdown" {
+		return nil, ErrInvalidCommand
 	}
+	return &FlagConfig{
+		Cmd: cmd,
+		NodeID:   nodeId,
+		HttpAddr: listenAddr,
+		RaftAddr: raftAddr,
+		JoinAddr: joinAddr,
+	}, nil
 }

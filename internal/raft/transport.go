@@ -25,10 +25,10 @@ func (t *TCPNetAddr) String() string {
 	return t.Addr
 }
 
-func NewRaftTCPTransport(raddr string, laddr string, logger hclog.Logger) (*raft.NetworkTransport, error) {
+func NewRaftTCPTransport(raddr string, logger hclog.Logger) (*raft.NetworkTransport, error) {
 	
 	netAddr := newTcpNetAddr(raddr)
 
-	logger.Info("transport addresses", "net addr", netAddr, "raddr", raddr, "laddr", laddr)
-	return raft.NewTCPTransportWithLogger(laddr, nil, maxTCPConnPool, connTCPTimeout, logger)
+	logger.Info("transport addresses", "net addr", netAddr, "raddr", raddr)
+	return raft.NewTCPTransportWithLogger(raddr, nil, maxTCPConnPool, connTCPTimeout, logger)
 }

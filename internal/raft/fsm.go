@@ -23,6 +23,11 @@ const (
 	OpDelete = "DELETE"
 )
 
+type KV struct {
+	Key []byte `json:"key"`
+	Value []byte `json:"value"`
+}
+
 type RaftFSM struct {
 	DB       *bolt.DB
 	ServerId raft.ServerID
