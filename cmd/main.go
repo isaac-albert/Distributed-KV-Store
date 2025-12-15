@@ -50,6 +50,8 @@ func StartProgram() error {
 		log.Fatal(err)
 	}
 
+	//give some time to get into leader position for the first node or the second node:
+	time.Sleep(4 * time.Second)
 	log.Println("Node running, press CTRL+C to stop server")
 
 	select {

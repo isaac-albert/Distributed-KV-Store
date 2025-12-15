@@ -24,8 +24,8 @@ const (
 )
 
 type KV struct {
-	Key []byte `json:"key"`
-	Value []byte `json:"value"`
+	Key string `json:"key"`
+	Value string `json:"value"`
 }
 
 type RaftFSM struct {
@@ -37,10 +37,6 @@ type FSMSnapshot struct {
 	Tx *bolt.Tx
 }
 
-// type KV struct {
-// 	Key []byte `json:"key"`
-// 	Value []byte `json:"value"`
-// }
 
 type KVOp struct {
 	*KV
@@ -90,7 +86,7 @@ func (r *RaftFSM) Apply(log *raft.Log) interface{} {
 		}
 		return FSMResponse{Kv: kv, Error: nil}
 	case OpDelete:
-		err := r.Delete(kvOp.Key)
+		err := r.Delete([]byte(kvOp.Key))
 		if err != nil {
 			return FSMResponse{Kv: KV{}, Error: fmt.Errorf("error deleting key: value: %w", err)}
 		}
@@ -103,13 +99,9 @@ func (r *RaftFSM) Apply(log *raft.Log) interface{} {
 
 func (r *RaftFSM) Update(k *KVOp) (KV, error) {
 	err := r.DB.Update(func(tx *bolt.Tx) error {
-		err := tx.Bucket([]byte(BUCKET_NAME)).Put(k.Key, k.Value)
+		err := tx.Bucket([]byte(BUCKET_NAME)).Put([]byte(k.Key), []byte(k.Value))
 		if err != nil {
 			return err
-		}
-		err = tx.Commit()
-		if err != nil {
-			return fmt.Errorf("error commititng update to db: %w", err)
 		}
 		return nil
 	})
@@ -117,23 +109,22 @@ func (r *RaftFSM) Update(k *KVOp) (KV, error) {
 	if err != nil {
 		return KV{}, fmt.Errorf("error updating key, value: %w", err)
 	}
-	return *k.KV, nil
+
+	return KV{Key: k.Key, Value: k.Value}, nil
 }
 
 func (r *RaftFSM) Get(key []byte) (KV, error) {
 	var kv = KV{}
 	err := r.DB.View(func(tx *bolt.Tx) error {
-		value := tx.Bucket([]byte(BUCKET_NAME)).Get(key)
-		if value == nil {
+		b := tx.Bucket([]byte(BUCKET_NAME))
+		if b == nil {
 			return errors.New("error finding value")
 		}
-		kv.Key = key
-		kv.Value = make([]byte, len(value))
-		copy(kv.Value, value)
-		err := tx.Rollback()
-		if err != nil {
-			return fmt.Errorf("error roll back get from db: %w", err)
-		}
+		value := b.Get(key)
+		kv.Key = string(key)
+		// kv.Value = make([]rune, len(value))
+		// copy(kv.Value, value)
+		kv.Value = string(value)
 		return nil
 	})
 	return kv, err
@@ -144,10 +135,6 @@ func (r *RaftFSM) Delete(key []byte) error {
 		err := tx.Bucket([]byte(BUCKET_NAME)).Delete(key)
 		if err != nil {
 			return err
-		}
-		err = tx.Commit()
-		if err != nil {
-			return fmt.Errorf("error commititng update to db: %w", err)
 		}
 		return nil
 	})

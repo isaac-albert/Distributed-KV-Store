@@ -13,7 +13,7 @@ const (
 	BOOTSTRAP_NODE              = "node0"
 	SnapsRetainCount            = 5
 	ProcessRPCTimeout           = 100 * time.Millisecond
-	AddVoterTimeout             = 200 * time.Millisecond
+	// AddVoterTimeout             = 200 * time.Millisecond
 	GetLeaderTimeout            = 500 * time.Millisecond
 	GetValidNodeTimeout         = 200 * time.Millisecond
 	GetNodeTicker               = 50 * time.Millisecond
