@@ -122,7 +122,7 @@ go build -o kvstore
 ./kvstore -id node2 -laddr 127.0.0.1:3002 -raddr 127.0.0.1:4002 -join 127.0.0.1:3000
 ```
 
-## Test It:
+## Test:
 
 **Write to the Leader (Node 0)**
 ```
