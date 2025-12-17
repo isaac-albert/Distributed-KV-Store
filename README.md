@@ -122,13 +122,20 @@ go build -o kvstore
 ./kvstore -id node2 -laddr 127.0.0.1:3002 -raddr 127.0.0.1:4002 -join 127.0.0.1:3000
 ```
 
-**Test It:**
-```
-# Write to the Leader (Node 0)
-curl -X POST "[http://127.0.0.1:3000/set](http://127.0.0.1:3000/set)" -d '{"key": "foo", "value": "bar"}'
+## Test It:
 
-# Read from the Follower (Node 1)
+**Write to the Leader (Node 0)**
+```
+curl -X POST "[http://127.0.0.1:3000/set](http://127.0.0.1:3000/set)" -d '{"key": "foo", "value": "bar"}'
+```
+
+**Read from the Follower (Node 1)**
+```
 curl "[http://127.0.0.1:3001/get?key=foo](http://127.0.0.1:3001/get?key=foo)"
-# Output: bar
+```
+
+**Output:** 
+```
+bar
 ```
 
