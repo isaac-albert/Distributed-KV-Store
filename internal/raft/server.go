@@ -22,12 +22,12 @@ const (
 	StartNode           = "node0"
 	AddVoterTimeout     = 5 * time.Second
 	RemoveServerTimeout = 2 * time.Second
-	LeaderApplyTimeout = 500 * time.Millisecond
+	LeaderApplyTimeout  = 500 * time.Millisecond
 	BadRequestMsg       = "failed to decode request"
 	VoterFailedToJoin   = "failed to join the cluster"
 	ServerFailedToLeave = "failed to leave the server"
-	SuccessfullJoin = "successfully joined the cluster"
-	SuccessfullLeave = "successfully left the cluster"
+	SuccessfullJoin     = "successfully joined the cluster"
+	SuccessfullLeave    = "successfully left the cluster"
 )
 
 type Server struct {
@@ -90,6 +90,8 @@ func (s *Server) getHttpServer(httpAddr string) error {
 	mux.HandleFunc("/delete", s.DeleteKV)
 	mux.HandleFunc("/join", s.JoinCluster)
 	mux.HandleFunc("/leave", s.LeaveCluster)
+	mux.HandleFunc("/getleader", s.GetLeader)
+	mux.HandleFunc("/removeserver", s.RemoveServer)
 
 	srv := &http.Server{
 		Addr:    httpAddr,
@@ -100,19 +102,93 @@ func (s *Server) getHttpServer(httpAddr string) error {
 	return nil
 }
 
-func (s *Server) SetKV(w http.ResponseWriter, r *http.Request)    {
+func (s *Server) RemoveServer(w http.ResponseWriter, r *http.Request) {
+
+	var Resp = &struct{
+		NodeID string `json:"node_id"`
+	}{}
+
+	err := json.NewDecoder(r.Body).Decode(Resp)
+	if err != nil {
+		s.Logger.Error("error decoding address", "error", err)
+		http.Error(w, "error decoding body", http.StatusBadRequest)
+		return 
+	}
+
+	future := s.Node.VerifyLeader()
+	if err := future.Error(); err == nil {
+		future := s.Node.RemoveServer(raft.ServerID(Resp.NodeID), 0, 0)
+		if err := future.Error(); err != nil {
+			s.Logger.Error("error failed to remove server", "error", err)
+			SendJSONResponse(w, http.StatusInternalServerError, "error failed to remove server")
+			return 
+		}
+
+		w.WriteHeader(http.StatusOK)
+		SendJSONResponse(w, http.StatusOK, "successfully removed server")
+		return 
+	}
+
+	leaderAddr, leaderID := s.Node.LeaderWithID()
+	if leaderAddr == "" || leaderID == "" {
+		s.Logger.Error("error leader not exists")
+		http.Error(w, "leader not found", http.StatusInternalServerError)
+		return
+	}
+	haddr, err := parseHttpAddr(string(leaderAddr))
+	if err != nil {
+		http.Error(w, "error parsing http address", http.StatusInternalServerError)
+		return 
+	}
+
+	url := "http://" + haddr + "/removeserver"
+	resp, err := http.Post(url, "application/json", r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return 
+	}
+
+	err = ParseNodeResponse(resp)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	io.WriteString(w, "successfully removed server")
+}
+
+func (s *Server) GetLeader(w http.ResponseWriter, r *http.Request) {
+
+	leaderAddr, leaderID := s.Node.LeaderWithID()
+	if leaderAddr == "" || leaderID == "" {
+		s.Logger.Error("leader not found")
+		http.Error(w, "leader not found", http.StatusInternalServerError)
+		return 
+	}
+
+	w.WriteHeader(http.StatusOK)
+	io.WriteString(w, fmt.Sprintf("leader address: %s | leader id: %s", leaderAddr, leaderID))
+}
+
+func (s *Server) SetKV(w http.ResponseWriter, r *http.Request) {
+
+	// s.Logger.Info("raft state", "state", s.Node.State())
+	// addr, id :=  s.Node.LeaderWithID()
+	// s.Logger.Info("raft leader", "leader","addr", addr, "id", id)
+	// s.Logger.Info("raft term", "term", s.Node.CurrentTerm())
 
 	future := s.Node.VerifyLeader()
 	if err := future.Error(); err != nil {
 		s.Logger.Error("leader changed")
-		s.RedirectToLeader(w, r)
+		s.RedirectToLeader(w, r, OpSet)
 		return
 	}
 
-	s.LeaderKVApply(w, r)
+	s.LeaderKVApply(w, r, OpSet)
 }
 
-func (s *Server) RedirectToLeader(w http.ResponseWriter, r *http.Request) {
+func (s *Server) RedirectToLeader(w http.ResponseWriter, r *http.Request, cmd string) {
 
 	//gets the leader addr, sends a request to leader using /set/redirect
 	//successfull write to db, send ok
@@ -121,17 +197,27 @@ func (s *Server) RedirectToLeader(w http.ResponseWriter, r *http.Request) {
 	if raddr == "" || id == "" {
 		s.Logger.Error("leader not found, retry....")
 		http.Error(w, "leader not found, retry...", http.StatusInternalServerError)
-		return 
+		return
 	}
 
 	haddr, err := parseHttpAddr(string(raddr))
 	if err != nil {
 		s.Logger.Error("error parsing http address of leader", "error", err)
 		http.Error(w, "error parsing http address of leader", http.StatusInternalServerError)
-		return 
+		return
 	}
 
-	url := "http://" + haddr + "/set" 
+	url := ""
+	switch cmd {
+	case OpSet:
+		url = "http://" + haddr + "/set"
+	case OpDelete:
+		url = "http://" + haddr + "/delete"
+	default:
+		s.Logger.Error("invalid command to leader redirect")
+		return
+	}
+
 	_, err = http.Post(url, "application/json", r.Body)
 	if err != nil {
 		s.Logger.Error("error getting a response from leader apply", "error", err)
@@ -140,78 +226,101 @@ func (s *Server) RedirectToLeader(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
-	io.WriteString(w, "successfull write to leader \n")
+	io.WriteString(w, "successfull transaction to leader \n")
 }
 
-func (s *Server) LeaderKVApply(w http.ResponseWriter, r *http.Request) {
+func (s *Server) LeaderKVApply(w http.ResponseWriter, r *http.Request, cmd string) {
+
+	// s.Logger.Info("raft state", "state", s.Node.State())
+	// addr, id :=  s.Node.LeaderWithID()
+	// s.Logger.Info("raft leader", "leader","addr", addr, "id", id)
+	// s.Logger.Info("raft term", "term", s.Node.CurrentTerm())
 
 	var kvop = &KVOp{
-		Op: OpSet,
+		Op: cmd,
 	}
 
 	err := json.NewDecoder(r.Body).Decode(kvop)
 	if err != nil {
 		s.Logger.Error("error decoding body", "error", err)
 		http.Error(w, "error decoding body", http.StatusBadRequest)
-		return 
+		return
 	}
 
 	data, err := json.Marshal(kvop)
 	if err != nil {
 		s.Logger.Error("error marshalling data", "error", err)
 		http.Error(w, "error marshalling data", http.StatusInternalServerError)
-		return 
+		return
 	}
 
 	future := s.Node.Apply(data, LeaderApplyTimeout)
 	if err := future.Error(); err != nil {
 		s.Logger.Error("error applying to leader", "error", err)
 		http.Error(w, "error applying to leader", http.StatusInternalServerError)
-		return 
+		return
 	}
 
-	resp := future.Response()
+	fsmResp := future.Response()
 
-	rData, err := json.Marshal(resp)
+	rData, err := json.Marshal(fsmResp)
+	if err != nil {
+		//s.Logger.Error("error parsing response from fsm", "error", err)
+		http.Error(w, "error parsing response from fsm", http.StatusInternalServerError)
+		return
+	}
+
+	resp := &FSMResponse{}
+
+	err = json.Unmarshal(rData, resp)
 	if err != nil {
 		s.Logger.Error("error parsing response from fsm", "error", err)
-		http.Error(w, "error parsing response from fsm", http.StatusInternalServerError)
-		return 
+		http.Error(w, "error parsing fsm response", http.StatusBadGateway)
+		return
 	}
 
+	if resp.Error != nil {
+		s.Logger.Error("error fsm in setkv", "error", resp.Error)
+		http.Error(w, "error setting kv to fsm", http.StatusBadRequest)
+		return
+	}
 
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(rData)
+	io.WriteString(w, "successfully applied to fsm")
 }
-func (s *Server) GetKV(w http.ResponseWriter, r *http.Request)    {
+func (s *Server) GetKV(w http.ResponseWriter, r *http.Request) {
+
+	// s.Logger.Info("raft state", "state", s.Node.State())
+	// addr, id :=  s.Node.LeaderWithID()
+	// s.Logger.Info("raft leader", "leader","addr", addr, "id", id)
+	// s.Logger.Info("raft term", "term", s.Node.CurrentTerm())
 
 	s.Logger.Info("url string", "url", r.URL.Query())
 	key := r.URL.Query()["key"][0]
-	
+
 	kv, err := s.Node.FSM.Get([]byte(key))
 	if err != nil {
 		s.Logger.Error("error finding the value of key", "error", err)
 		http.Error(w, "error finding value of key", http.StatusBadRequest)
-		return 
+		return
 	}
 
 	w.WriteHeader(http.StatusOK)
 	io.WriteString(w, fmt.Sprintf("%s\n", kv.Value))
 }
 
-// func URLParse(keyMap map[string][]string) (string, error) {
+func (s *Server) DeleteKV(w http.ResponseWriter, r *http.Request) {
 
-// 	u, err := url.Parse(urlStr)
-// 	if err != nil {
-// 		return "", fmt.Errorf("error parsing url: %w", err)
-// 	}
+	future := s.Node.VerifyLeader()
+	if err := future.Error(); err != nil {
+		s.Logger.Error("leader changed")
+		s.RedirectToLeader(w, r, OpDelete)
+		return
+	}
 
-// 	q := u.Query()
-// 	key := q.Get("key")
-// 	return key, nil
-// } 
-func (s *Server) DeleteKV(w http.ResponseWriter, r *http.Request) {}
+	s.LeaderKVApply(w, r, OpDelete)
 
+}
 
 func (s *Server) JoinCluster(w http.ResponseWriter, r *http.Request) {
 
@@ -272,6 +381,11 @@ func (s *Server) ShutdownHTTP(ctx context.Context) error {
 
 func (s *Server) ShutdownRaft() error {
 
+	// s.Logger.Info("raft state", "state", s.Node.State())
+	// addr, id :=  s.Node.LeaderWithID()
+	// s.Logger.Info("raft leader", "leader","addr", addr, "id", id)
+	// s.Logger.Info("raft term", "term", s.Node.CurrentTerm())
+
 	if s.Node.ServerId == StartNode {
 		future := s.Node.Shutdown()
 		if err := future.Error(); err != nil {
@@ -297,13 +411,18 @@ func (s *Server) ShutdownRaft() error {
 
 func (s *Server) sendLeaveReqToNetwork(leaveAddr string) error {
 
+	// s.Logger.Info("raft state", "state", s.Node.State())
+	// addr, id :=  s.Node.LeaderWithID()
+	// s.Logger.Info("raft leader", "leader","addr", addr, "id", id)
+	// s.Logger.Info("raft term", "term", s.Node.CurrentTerm())
+
 	httpAddr, err := parseHttpAddr(leaveAddr)
 	if err != nil {
 		return fmt.Errorf("failed to parse http address from leader's address: %w", err)
 	}
 
 	payload := &NodeRequest{
-		Id: s.Node.ServerId,
+		Id:      s.Node.ServerId,
 		Address: s.Node.RaftAddr,
 	}
 
@@ -329,14 +448,8 @@ func (s *Server) sendLeaveReqToNetwork(leaveAddr string) error {
 
 func (s *Server) ShutdownStores() error {
 
-	dbDirPath := filepath.Join("assets", "db", string(s.Node.ServerId))
-	err := os.RemoveAll(dbDirPath)
-	if err != nil {
-		return fmt.Errorf("error removing db: %w", err)
-	}
-
 	storeDirPath := filepath.Join("assets", "stores", string(s.Node.ServerId))
-	err = os.RemoveAll(storeDirPath)
+	err := os.RemoveAll(storeDirPath)
 	if err != nil {
 		return fmt.Errorf("error removing stores: %w", err)
 	}

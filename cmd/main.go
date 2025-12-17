@@ -64,18 +64,20 @@ func StartProgram() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	var errSh error 
+
 	if err := server.ShutdownHTTP(ctx); err != nil {
-		return fmt.Errorf("http shutdown error: %w", err)
+		errSh = fmt.Errorf("http shutdown error: %w", err)
 	}
 
 	if err := server.ShutdownRaft(); err != nil {
-		return fmt.Errorf("raft shutdown error: %w", err)
+		errSh = fmt.Errorf("raft shutdown error: %w", err)
 	}
 
 	if err := server.ShutdownStores(); err != nil {
-		return fmt.Errorf("store shutdown error: %w", err)
+		errSh = fmt.Errorf("store shutdown error: %w", err)
 	}
 
 	log.Println("Server exited successfully")
-	return nil
+	return errSh
 }
