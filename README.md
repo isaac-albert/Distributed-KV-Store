@@ -108,14 +108,17 @@ go build -o kvstore
 ```
 
 **Run Node1 (Leader):**
-```./kvstore -id node0 -laddr 127.0.0.1:3000 -raddr 127.0.0.1:4000
+```
+./kvstore -id node0 -laddr 127.0.0.1:3000 -raddr 127.0.0.1:4000
 ```
 
 **Run Node 2:**
-```./kvstore -id node1 -laddr 127.0.0.1:3001 -raddr 127.0.0.1:4001 -join 127.0.0.1:3000
+```
+./kvstore -id node1 -laddr 127.0.0.1:3001 -raddr 127.0.0.1:4001 -join 127.0.0.1:3000
 ```
 
 **Run Node 3:**
-```./kvstore -id node2 -laddr 127.0.0.1:3002 -raddr 127.0.0.1:4002 -join 127.0.0.1:3000
+```
+./kvstore -id node2 -laddr 127.0.0.1:3002 -raddr 127.0.0.1:4002 -join 127.0.0.1:3000
 ```
 
