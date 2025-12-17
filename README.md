@@ -123,7 +123,8 @@ go build -o kvstore
 ```
 
 **Test It:**
-```# Write to the Leader (Node 0)
+```
+# Write to the Leader (Node 0)
 curl -X POST "[http://127.0.0.1:3000/set](http://127.0.0.1:3000/set)" -d '{"key": "foo", "value": "bar"}'
 
 # Read from the Follower (Node 1)
